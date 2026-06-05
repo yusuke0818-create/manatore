@@ -3,11 +3,18 @@
 # 対象OS：Windows / Mac / Linux
 # 依存ライブラリ：streamlit, plotly, yfinance
 
+import os
+
 from dotenv import load_dotenv
 
 load_dotenv()
 
 import streamlit as st
+
+# Streamlit Cloud: st.secrets → os.environ に転送（os.environ.get()で読む既存コードと互換）
+for _key, _val in st.secrets.items():
+    if isinstance(_val, str):
+        os.environ.setdefault(_key, _val)
 
 from clients.claude_client import ClaudeClient
 from clients.newsdata_client import NewsdataClient
