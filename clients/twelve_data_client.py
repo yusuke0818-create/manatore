@@ -6,6 +6,7 @@
 import re
 
 import pandas as pd
+import requests
 import yfinance as yf
 
 
@@ -55,13 +56,21 @@ class TwelveDataClient:
             # 配当利回り：info 失敗時は dividends（chart エンドポイント）から計算
             div_yield = info.get("dividendYield") or _calc_div_yield(ticker, price)
 
+            # PER/PBR：info が取れない環境ではブラウザ風リクエストでフォールバック
+            pe_value = info.get("trailingPE")
+            pb_value = info.get("priceToBook")
+            if pe_value is None or pb_value is None:
+                fundamentals = _fetch_fundamentals(normalized)
+                pe_value = pe_value or fundamentals.get("trailingPE")
+                pb_value = pb_value or fundamentals.get("priceToBook")
+
             return {
                 "close": price,
                 "previous_close": prev_close,
                 "volume": fi.last_volume,
                 "market_cap": market_cap,
-                "pe": info.get("trailingPE"),
-                "pb": info.get("priceToBook"),
+                "pe": pe_value,
+                "pb": pb_value,
                 "dividend_yield": div_yield if div_yield else None,
             }
         except TwelveDataApiError:
@@ -136,6 +145,61 @@ def _calc_div_yield(ticker: yf.Ticker, price: float) -> float | None:
         return None
     except Exception:
         return None
+
+
+def _fetch_fundamentals(symbol: str) -> dict:
+    """ticker.info が取れない環境向けに、crumb付きリクエストでPER・PBRを取得する。"""
+    session = requests.Session()
+    session.headers.update({
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/125.0.0.0 Safari/537.36"
+        ),
+        "Accept": "*/*",
+        "Accept-Language": "en-US,en;q=0.5",
+    })
+    try:
+        # クッキー取得
+        try:
+            session.get("https://fc.yahoo.com", timeout=5)
+        except Exception:
+            pass
+        # crumb 取得（query1 → query2 の順で試行）
+        crumb = None
+        for base in ("query1", "query2"):
+            try:
+                res = session.get(
+                    f"https://{base}.finance.yahoo.com/v1/test/getcrumb",
+                    timeout=5,
+                )
+                if res.status_code == 200 and res.text.strip():
+                    crumb = res.text.strip()
+                    break
+            except Exception:
+                continue
+        if not crumb:
+            return {}
+        # quoteSummary 取得
+        res = session.get(
+            f"https://query1.finance.yahoo.com/v10/finance/quoteSummary/{symbol}",
+            params={"modules": "summaryDetail,defaultKeyStatistics", "crumb": crumb},
+            timeout=10,
+        )
+        if res.status_code != 200:
+            return {}
+        modules = res.json().get("quoteSummary", {}).get("result", [{}])[0]
+
+        def _raw(d: dict, key: str):
+            v = d.get(key)
+            return v.get("raw") if isinstance(v, dict) else v
+
+        return {
+            "trailingPE": _raw(modules.get("summaryDetail", {}), "trailingPE"),
+            "priceToBook": _raw(modules.get("defaultKeyStatistics", {}), "priceToBook"),
+        }
+    except Exception:
+        return {}
 
 
 def _outputsize_to_period(outputsize: int) -> str:
