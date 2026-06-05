@@ -1,0 +1,17 @@
+# 機密情報
+.env
+.streamlit/secrets.toml
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# ログ
+*.log
+
+# IDE
+.vscode/
+.idea/
