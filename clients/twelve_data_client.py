@@ -5,6 +5,7 @@
 
 import re
 
+import pandas as pd
 import yfinance as yf
 
 
@@ -45,12 +46,20 @@ class TwelveDataClient:
             if price is None or prev_close is None:
                 return {}
 
-            div_yield = info.get("dividendYield")
+            # market_cap は fast_info から取得（info より安定。Cloud環境でも動く）
+            try:
+                market_cap = fi.market_cap
+            except (KeyError, AttributeError):
+                market_cap = info.get("marketCap")
+
+            # 配当利回り：info 失敗時は dividends（chart エンドポイント）から計算
+            div_yield = info.get("dividendYield") or _calc_div_yield(ticker, price)
+
             return {
                 "close": price,
                 "previous_close": prev_close,
                 "volume": fi.last_volume,
-                "market_cap": info.get("marketCap"),
+                "market_cap": market_cap,
                 "pe": info.get("trailingPE"),
                 "pb": info.get("priceToBook"),
                 "dividend_yield": div_yield if div_yield else None,
@@ -109,6 +118,24 @@ def _safe_info(ticker: yf.Ticker) -> dict:
         return info if isinstance(info, dict) else {}
     except Exception:
         return {}
+
+
+def _calc_div_yield(ticker: yf.Ticker, price: float) -> float | None:
+    """ticker.infoが取れない環境向けに、配当履歴から利回りを計算する。"""
+    try:
+        divs = ticker.dividends
+        if divs is None or len(divs) == 0:
+            return None
+        one_year_ago = pd.Timestamp.now(tz="UTC") - pd.DateOffset(years=1)
+        recent = divs[divs.index >= one_year_ago]
+        if len(recent) == 0:
+            return None
+        annual_div = float(recent.sum())
+        if price > 0 and annual_div > 0:
+            return (annual_div / price) * 100
+        return None
+    except Exception:
+        return None
 
 
 def _outputsize_to_period(outputsize: int) -> str:
