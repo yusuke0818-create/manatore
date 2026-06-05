@@ -35,11 +35,10 @@ def _fetch_profile(_client: TwelveDataClient, symbol: str, preset: dict) -> Stoc
     except Exception:
         raw = {}
 
-    name = raw.get("name") or (fallback["name"] if fallback else symbol)
-    sector = raw.get("sector") or (fallback["sector"] if fallback else "")
-    description = raw.get("description") or (
-        fallback["description"] if fallback else "企業概要を取得できませんでした。"
-    )
+    # プリセット（日本語）がある場合は優先。ない場合のみ yfinance（英語）を使う
+    name = (fallback["name"] if fallback else None) or raw.get("name") or symbol
+    sector = (fallback["sector"] if fallback else None) or raw.get("sector") or ""
+    description = (fallback["description"] if fallback else None) or raw.get("description") or "企業概要を取得できませんでした。"
 
     return StockProfile(
         symbol=symbol,
