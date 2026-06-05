@@ -148,56 +148,52 @@ def _calc_div_yield(ticker: yf.Ticker, price: float) -> float | None:
 
 
 def _fetch_fundamentals(symbol: str) -> dict:
-    """ticker.info が取れない環境向けに、crumb付きリクエストでPER・PBRを取得する。"""
-    session = requests.Session()
-    session.headers.update({
+    """Kabutan（株探）からPER・PBRを取得する（日本株専用）。
+    Yahoo Finance US の quoteSummary はクラウド環境でIP制限されるため、
+    クラウド環境でも安定してアクセスできる国内サイトを使用する。
+    """
+    if not symbol.endswith(".T"):
+        return {}
+    code = symbol[:-2]  # ".T" を除去して4桁コードにする
+    url = f"https://kabutan.jp/stock/?code={code}"
+    headers = {
         "User-Agent": (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
             "AppleWebKit/537.36 (KHTML, like Gecko) "
             "Chrome/125.0.0.0 Safari/537.36"
         ),
-        "Accept": "*/*",
-        "Accept-Language": "en-US,en;q=0.5",
-    })
+        "Accept-Language": "ja-JP,ja;q=0.9",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    }
     try:
-        # クッキー取得
-        try:
-            session.get("https://fc.yahoo.com", timeout=5)
-        except Exception:
-            pass
-        # crumb 取得（query1 → query2 の順で試行）
-        crumb = None
-        for base in ("query1", "query2"):
-            try:
-                res = session.get(
-                    f"https://{base}.finance.yahoo.com/v1/test/getcrumb",
-                    timeout=5,
-                )
-                if res.status_code == 200 and res.text.strip():
-                    crumb = res.text.strip()
-                    break
-            except Exception:
-                continue
-        if not crumb:
+        resp = requests.get(url, headers=headers, timeout=10)
+        if resp.status_code != 200:
             return {}
-        # quoteSummary 取得
-        res = session.get(
-            f"https://query1.finance.yahoo.com/v10/finance/quoteSummary/{symbol}",
-            params={"modules": "summaryDetail,defaultKeyStatistics", "crumb": crumb},
-            timeout=10,
+        html = resp.text
+        # PER・PBRテーブル: data-help="PER" ヘッダーの直後のtbody最初のtr
+        m = re.search(
+            r'data-help="PER".*?<tbody[^>]*>\s*<tr[^>]*>(.*?)</tr>',
+            html,
+            re.DOTALL,
         )
-        if res.status_code != 200:
+        if not m:
             return {}
-        modules = res.json().get("quoteSummary", {}).get("result", [{}])[0]
+        tds = re.findall(r"<td>(.*?)</td>", m.group(1), re.DOTALL)
 
-        def _raw(d: dict, key: str):
-            v = d.get(key)
-            return v.get("raw") if isinstance(v, dict) else v
+        def _parse(td_html: str) -> float | None:
+            n = re.search(r"[\d.]+", td_html)
+            return float(n.group()) if n else None
 
-        return {
-            "trailingPE": _raw(modules.get("summaryDetail", {}), "trailingPE"),
-            "priceToBook": _raw(modules.get("defaultKeyStatistics", {}), "priceToBook"),
-        }
+        result = {}
+        if len(tds) >= 1:
+            v = _parse(tds[0])
+            if v is not None:
+                result["trailingPE"] = v
+        if len(tds) >= 2:
+            v = _parse(tds[1])
+            if v is not None:
+                result["priceToBook"] = v
+        return result
     except Exception:
         return {}
 
