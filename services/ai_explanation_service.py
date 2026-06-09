@@ -11,6 +11,57 @@ class AiExplanationService:
         prompt = _build_prompt(symbol, quote, profile)
         return self._client.generate(prompt)
 
+    def get_case_study_feedback(
+        self,
+        symbol: str,
+        company_name: str,
+        snapshot: dict,
+        user_input: str,
+    ) -> str:
+        """Step6 ケーススタディ用の教育的フィードバックを生成して返す。"""
+        prompt = _build_case_study_prompt(symbol, company_name, snapshot, user_input[:500])
+        return self._client.generate(prompt)
+
+    def generate_raw(self, prompt: str) -> str:
+        """任意のプロンプトをそのままClaudeに送り、レスポンステキストを返す。"""
+        return self._client.generate(prompt)
+
+
+def _build_case_study_prompt(
+    symbol: str,
+    company_name: str,
+    snapshot: dict,
+    user_input: str,
+) -> str:
+    snapshot_text = "\n".join([
+        f"ローソク足: {snapshot.get('candlestick', '―')}",
+        f"移動平均線: {snapshot.get('ma', '―')}",
+        f"出来高: {snapshot.get('volume', '―')}",
+        f"RSI: {snapshot.get('rsi', '―')}",
+        f"MACD: {snapshot.get('macd', '―')}",
+    ])
+    return f"""あなたは投資学習の先生です。初心者の学習者が株式指標を見て判断を下す練習をしています。
+
+【分析対象銘柄】
+{company_name}（{symbol}）
+
+【現在の指標サマリー（自動生成）】
+{snapshot_text}
+
+【学習者の判断・考え】
+{user_input}
+
+【あなたへの依頼】
+学習者の考えを踏まえて、教育的なフィードバックを150〜250字で提供してください。
+
+【フィードバックの方針】
+・学習者の視点を認めてから補足する（否定から入らない）
+・指標の読み方や複数指標を組み合わせる視点を伝える
+・「いい視点です」「その点も考えてみましょう」などの対話的・肯定的トーンを使う
+・「買うべき」「売るべき」「今がチャンス」などの売買判断・推奨表現は絶対に使わない
+・断定的な将来予測はしない
+・末尾に必ず「このフィードバックは学習目的であり、投資の助言ではありません。」を含める"""
+
 
 def _build_prompt(symbol: str, quote: StockQuote, profile: StockProfile) -> str:
     per_str = f"{quote.pe_ratio:.1f}倍" if quote.pe_ratio else "取得できません"

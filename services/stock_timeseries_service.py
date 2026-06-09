@@ -32,10 +32,14 @@ def _fetch_timeseries(_client: TwelveDataClient, symbol: str, outputsize: int) -
     points: list[TimeSeriesPoint] = []
     for item in reversed(values):  # Twelve Data は新しい順なので反転して古い順にする
         try:
-            d = date.fromisoformat(item["datetime"])
-            close = float(item["close"])
-            volume = int(item.get("volume", 0))
-            points.append(TimeSeriesPoint(date=d, close=close, volume=volume))
+            points.append(TimeSeriesPoint(
+                date=date.fromisoformat(item["datetime"]),
+                close=float(item["close"]),
+                open=float(item.get("open", 0.0)),
+                high=float(item.get("high", 0.0)),
+                low=float(item.get("low", 0.0)),
+                volume=int(item.get("volume", 0)),
+            ))
         except (KeyError, ValueError):
             continue
 

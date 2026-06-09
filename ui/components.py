@@ -5,6 +5,7 @@
 
 import json
 import math
+import re
 from datetime import date, datetime
 from pathlib import Path
 
@@ -13,9 +14,16 @@ import plotly.graph_objects as go
 import plotly.subplots as psp
 import streamlit as st
 
+from clients.twelve_data_client import TwelveDataApiError, TwelveDataNetworkError
 from config import APP_LAUNCH_DATE, CHART_DEFAULT_PERIOD, CHART_PERIODS, PRESET_SYMBOLS
 from models.stock_models import StockProfile, StockQuote, TimeSeries
 from ui import glossary
+from ui.indicator_helpers import calc_macd, calc_rsi
+
+
+def _safe_url(url: str) -> str:
+    """http/https 以外のスキームを除去する（XSS対策）。"""
+    return url if re.match(r"^https?://", url, re.IGNORECASE) else "#"
 
 _DISCLAIMER_PATH = Path(__file__).parent.parent / "data" / "disclaimer.txt"
 _LEARNING_WORDS_PATH = Path(__file__).parent.parent / "data" / "learning_words.json"
@@ -30,8 +38,88 @@ def render_disclaimer_banner() -> None:
     st.warning(text)
 
 
-def render_stock_selector() -> str | None:
+_LEVEL_LABELS = ["L0\n入門", "L1\n基礎", "L2\n企業", "L3\nファンダ", "L4\nチャート", "L5\nトレンド", "L6\n指標", "L7\n総合", "L8\n準備", "GOAL\n卒業"]
+_LEVEL_NAMES = {
+    0: "マナトレ入門", 1: "株の基礎", 2: "企業価値の見方", 3: "ファンダメンタル分析",
+    4: "チャート基礎", 5: "トレンド分析", 6: "モメンタム分析", 7: "総合分析",
+    8: "購入準備", 9: "GOAL",
+}
+
+
+def render_track_selector() -> str | None:
+    """
+    2トラック選択UIを表示する。
+    - 未選択の場合: ホーム画面を表示し None を返す
+    - 選択済みの場合: 選択中のトラック名（"beginner" | "free"）を返す
+    """
+    track = st.session_state.get("track")
+
+    if track is None:
+        st.markdown("## 📈 マナトレへようこそ")
+        st.markdown("**あなたはどちらですか？**")
+        col1, col2 = st.columns(2)
+        with col1:
+            with st.container(border=True):
+                st.markdown("#### 🎓 投資初心者")
+                st.write("Lesson 0から順番に投資を学ぶ")
+                if st.button("学習コースを始める", key="track_beginner_btn", type="primary", use_container_width=True):
+                    st.session_state["track"] = "beginner"
+                    st.session_state["symbol"] = None
+                    if "manual_input" in st.session_state:
+                        del st.session_state["manual_input"]
+                    st.rerun()
+        with col2:
+            with st.container(border=True):
+                st.markdown("#### 📊 経験者・確認用")
+                st.write("銘柄・チャートをすぐに確認したい方")
+                if st.button("自由分析を始める", key="track_free_btn", type="primary", use_container_width=True):
+                    st.session_state["track"] = "free"
+                    st.rerun()
+        return None
+
+    if track == "free":
+        if st.button("← コース選択に戻る", key="back_to_home_btn"):
+            st.session_state["track"] = None
+            st.rerun()
+
+    return track
+
+
+def render_level_map(current_level: int) -> None:
+    """
+    Level Mapを表示する。current_level は 0〜9（9=GOAL）。
+    - 完了（< current_level）: ✅
+    - 現在（== current_level、ただし 9 は 🎉）: 🔵
+    - 未到達（> current_level）: ⬜
+    - 「自由分析モードへ切り替える」ボタン付き
+    """
+    with st.container(border=True):
+        st.markdown("##### 📍 学習マップ")
+        cols = st.columns(10)
+        for i, label in enumerate(_LEVEL_LABELS):
+            if i < current_level:
+                icon = "✅"
+            elif i == current_level:
+                icon = "🎉" if i == 9 else "🔵"
+            else:
+                icon = "⬜"
+            cols[i].markdown(f"<div style='text-align:center'>{icon}<br><small>{label}</small></div>", unsafe_allow_html=True)
+
+        if current_level == 9:
+            level_name = "GOAL — 卒業完了！"
+        else:
+            level_name = f"Level {current_level} — {_LEVEL_NAMES.get(current_level, '')}"
+        st.caption(f"現在: {level_name}")
+
+        if st.button("自由分析モードへ切り替える", key="level_map_to_free_btn"):
+            st.session_state["track"] = "free"
+            st.rerun()
+
+
+def render_stock_selector(beginner_mode: bool = False) -> str | None:
     """プリセットボタン + 手入力で銘柄コードを返す。未選択時は None。"""
+    if beginner_mode:
+        st.info("📌 おすすめ銘柄（プリセット）で練習しましょう。下のボタンから選択してください。")
     st.subheader("銘柄を選択")
 
     st.write("よく使う銘柄:")
@@ -128,8 +216,14 @@ def render_ai_explanation_area(
             st.caption("※ AIによる解説です。投資判断の根拠に使用しないでください。")
 
 
-def render_chart_tabs(series: TimeSeries | None, period_label: str) -> str:
-    """チャートエリア（期間ボタン＋5タブ）を表示する。選択中の期間ラベルを返す。"""
+def render_chart_tabs(
+    series: TimeSeries | None,
+    period_label: str,
+    symbol: str = "",
+    company_name: str = "",
+    explanation_service=None,
+) -> str:
+    """チャートエリア（期間ボタン＋7タブ）を表示する。選択中の期間ラベルを返す。"""
     st.subheader("📊 チャート")
 
     # 期間切り替えボタン
@@ -141,7 +235,13 @@ def render_chart_tabs(series: TimeSeries | None, period_label: str) -> str:
         if cols[i].button(label, key=f"period_{label}", type=btn_type):
             selected = label
 
-    tab1, tab2, tab3, tab4, tab5 = st.tabs(["株価推移", "移動平均線", "出来高", "RSI", "MACD"])
+    tab0, tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(
+        ["ローソク足", "株価推移", "移動平均線", "出来高", "RSI", "MACD", "複数指標"]
+    )
+
+    with tab0:
+        _render_candlestick_chart(series)
+        _render_understanding_check_candlestick()
 
     with tab1:
         _render_timeseries_chart(series)
@@ -174,7 +274,168 @@ def render_chart_tabs(series: TimeSeries | None, period_label: str) -> str:
         _render_macd_chart(series)
         _render_understanding_check_macd()
 
+    with tab6:
+        st.markdown("### あなたはどのタイプの投資家？")
+        _render_investment_methods()
+        st.divider()
+        st.markdown("### Part 2: 現在の状況を6指標で確認する")
+        _render_step6_integrated_chart(series)
+        snapshot = _compute_step6_snapshot(series)
+        _render_step6_snapshot(snapshot)
+        st.divider()
+        _render_step6_case_study(snapshot, symbol, company_name, explanation_service)
+
     return selected
+
+
+@st.fragment
+def render_chart_section(
+    symbol: str,
+    company_name: str,
+    timeseries_service,
+    explanation_service,
+) -> None:
+    """チャートセクション（期間選択 + タブ）をfragmentとして描画。
+    期間ボタン押下時はfragmentのみrerunし、ページ全体のスクロールトップを防ぐ。
+    """
+    if "chart_period" not in st.session_state:
+        st.session_state["chart_period"] = CHART_DEFAULT_PERIOD
+
+    with st.spinner("チャートを読み込み中..."):
+        try:
+            series = timeseries_service.get(symbol, st.session_state["chart_period"])
+        except (TwelveDataApiError, TwelveDataNetworkError):
+            series = None
+
+    new_period = render_chart_tabs(
+        series, st.session_state["chart_period"],
+        symbol=symbol, company_name=company_name, explanation_service=explanation_service,
+    )
+    if new_period != st.session_state["chart_period"]:
+        st.session_state["chart_period"] = new_period
+        st.rerun(scope="fragment")
+
+
+def _render_candlestick_chart(series: TimeSeries | None) -> None:
+    """ローソク足チャート（陽線#26a69a・陰線#ef5350）を表示する。"""
+    st.markdown("#### 📊 Step0: ローソク足チャート")
+    st.markdown("**── まずここから！チャートの基本を身につけよう ──**")
+
+    if series is None or not series.data:
+        st.info("チャートデータを取得できませんでした。")
+    else:
+        dates = [p.date for p in series.data]
+        opens = [p.open for p in series.data]
+        highs = [p.high for p in series.data]
+        lows = [p.low for p in series.data]
+        closes = [p.close for p in series.data]
+
+        fig = go.Figure(data=[
+            go.Candlestick(
+                x=dates,
+                open=opens,
+                high=highs,
+                low=lows,
+                close=closes,
+                increasing_line_color="#26a69a",
+                increasing_fillcolor="#26a69a",
+                decreasing_line_color="#ef5350",
+                decreasing_fillcolor="#ef5350",
+                name="ローソク足",
+            )
+        ])
+        fig.update_layout(
+            xaxis_rangeslider_visible=False,
+            height=400,
+            margin={"l": 20, "r": 20, "t": 20, "b": 20},
+        )
+        st.plotly_chart(fig, use_container_width=True)
+        st.caption("陽線（緑）: 終値 > 始値（上昇した日） / 陰線（赤）: 終値 < 始値（下落した日）")
+
+    with st.container(border=True):
+        st.markdown("#### ローソク足の見方")
+        st.markdown("""
+```
+  上ヒゲ    ← その日の最高値
+    ┃
+  ┌─┃─┐  ← 始値（始まりの価格）
+  │ ┃ │  ← 実体（始値と終値の差）
+  └─┃─┘  ← 終値（終わりの価格）
+    ┃
+  下ヒゲ    ← その日の最安値
+```
+
+**■ ヒゲが長いと何を意味する？**
+上ヒゲが長い → 高値まで上がったが売られて押し返された
+下ヒゲが長い → 安値まで下がったが買われて戻した
+""")
+
+    with st.container(border=True):
+        st.markdown("#### 酒田五法（主要パターン概要）")
+        st.markdown("""
+・**三山（さんざん）**: 3回の高値山形 → 天井のサイン
+・**三川（さんせん）**: 3回の安値谷形 → 底値のサイン
+・**三空（さんくう）**: 連続する窓開け → 転換のサイン
+・**三兵（さんぺい）**: 陽線/陰線が3本続く → トレンド継続
+・**三法（さんぽう）**: 持ち合いからの放れ → 次のトレンドへ
+""")
+        st.caption("※ 酒田五法はパターンの概要紹介です。詳細は専門書で学習してください。")
+
+
+def _render_understanding_check_candlestick() -> None:
+    """ローソク足タブ末尾の理解チェック（任意参加・選択式1問）。"""
+    st.divider()
+    st.markdown("#### ✅ ローソク足 理解チェック（任意）")
+
+    state_key = "check_state_candlestick"
+    current_state = st.session_state.get(state_key)
+
+    if current_state == "passed":
+        with st.container(border=True):
+            st.success("🎉 正解！")
+            st.write("「終値が始値より高い状態」が正解です。")
+            st.write(
+                "陽線は1日の取引で株価が上昇したことを示します。"
+                "上ヒゲ・下ヒゲの長さを見ることで、その日の値動きの勢いや反発の強さも読み取れます。"
+            )
+            st.markdown("**ローソク足の理解チェック 合格 ✅**")
+        return
+
+    if current_state == "failed":
+        with st.container(border=True):
+            st.warning("もう一度考えてみましょう")
+            st.write(
+                "陽線は「始値より終値が高い」＝その日に株価が上昇した状態です。"
+                "陰線は逆に「始値より終値が低い」＝下落した状態を表します。"
+            )
+            if st.button("もう一度チャレンジ", key="check_retry_candlestick"):
+                del st.session_state[state_key]
+                st.rerun()
+        return
+
+    with st.container(border=True):
+        st.write("**Q. 陽線（緑のローソク）とはどのような状態ですか？**")
+        answer = st.radio(
+            "回答を選んでください",
+            options=[
+                "始値が終値より高い状態",
+                "終値が始値より高い状態",
+                "高値と安値の差が大きい状態",
+                "出来高が多い状態",
+            ],
+            key="check_radio_candlestick",
+            label_visibility="collapsed",
+            index=None,
+        )
+        if st.button("回答する", key="check_submit_candlestick"):
+            if answer is None:
+                st.warning("回答を選んでください。")
+            elif answer == "終値が始値より高い状態":
+                st.session_state[state_key] = "passed"
+                st.rerun()
+            else:
+                st.session_state[state_key] = "failed"
+                st.rerun()
 
 
 def _render_timeseries_chart(series: TimeSeries | None) -> None:
@@ -249,20 +510,6 @@ def _render_ma_chart(series: TimeSeries | None) -> None:
     st.caption("MA5=5日移動平均（短期）/ MA25=25日移動平均（中期）/ MA75=75日移動平均（長期）")
 
 
-def _calc_macd(closes: list[float]) -> tuple[list[float], list[float], list[float]]:
-    """MACD・シグナル・ヒストグラムを計算して返す。データ26件未満は全要素NaN。"""
-    if len(closes) < 26:
-        nan_list = [float("nan")] * len(closes)
-        return nan_list, nan_list[:], nan_list[:]
-    s = pd.Series(closes)
-    ema12 = s.ewm(span=12, adjust=False).mean()
-    ema26 = s.ewm(span=26, adjust=False).mean()
-    macd = ema12 - ema26
-    signal = macd.ewm(span=9, adjust=False).mean()
-    histogram = macd - signal
-    return macd.tolist(), signal.tolist(), histogram.tolist()
-
-
 def _render_macd_chart(series: TimeSeries | None) -> None:
     """MACDチャート（株価推移＋MACD/シグナル/ヒストグラムの2段サブプロット）を表示する。"""
     if series is None or not series.data:
@@ -271,7 +518,7 @@ def _render_macd_chart(series: TimeSeries | None) -> None:
 
     dates = [p.date for p in series.data]
     closes = [p.close for p in series.data]
-    macd, signal, histogram = _calc_macd(closes)
+    macd, signal, histogram = calc_macd(closes)
 
     colors = []
     for v in histogram:
@@ -361,6 +608,12 @@ def _render_understanding_check_macd() -> None:
                 "ただし偽シグナルもあるため、他の指標と組み合わせて判断することが大切です。"
             )
             st.markdown("**MACDの理解チェック 合格 ✅**")
+        st.info(
+            "✅ Step5 MACDの理解チェック 合格！\n\n"
+            "Step6「複数指標の組み合わせ実践」に進みましょう。\n"
+            "ここまで学んだ6つの指標を組み合わせて、実際に銘柄を分析する練習ができます。\n\n"
+            "「複数指標」タブを選択してください。"
+        )
         return
 
     if current_state == "failed":
@@ -391,19 +644,6 @@ def _render_understanding_check_macd() -> None:
             st.rerun()
 
 
-def _calc_rsi(closes: list[float], period: int = 14) -> list[float]:
-    """Wilder法でRSI(14)を計算して返す。期間不足の先頭はNaNのまま。"""
-    s = pd.Series(closes)
-    delta = s.diff()
-    gain = delta.clip(lower=0)
-    loss = (-delta).clip(lower=0)
-    avg_gain = gain.ewm(alpha=1 / period, min_periods=period, adjust=False).mean()
-    avg_loss = loss.ewm(alpha=1 / period, min_periods=period, adjust=False).mean()
-    rs = avg_gain / avg_loss.replace(0, float("nan"))
-    rsi = 100 - (100 / (1 + rs))
-    return rsi.tolist()
-
-
 def _render_rsi_chart(series: TimeSeries | None) -> None:
     """RSIチャート（株価推移＋RSI(14)の2段サブプロット）を表示する。"""
     if series is None or not series.data:
@@ -412,7 +652,7 @@ def _render_rsi_chart(series: TimeSeries | None) -> None:
 
     dates = [p.date for p in series.data]
     closes = [p.close for p in series.data]
-    rsi = _calc_rsi(closes)
+    rsi = calc_rsi(closes)
 
     fig = psp.make_subplots(
         rows=2, cols=1,
@@ -656,6 +896,278 @@ def _render_understanding_check_ma() -> None:
             st.rerun()
 
 
+def _render_investment_methods() -> None:
+    """Step6 Part1: 投資手法解説（テクニカル/ファンダメンタル・4スタイル）。"""
+    with st.container(border=True):
+        st.markdown("**【分析手法の違い】**")
+        st.markdown("""
+**■ テクニカル分析（本ツールで学んだ内容）**
+チャート・指標を使って売買タイミングを判断する手法
+→ MA・RSI・MACDなどがここに含まれる
+
+**■ ファンダメンタル分析**
+企業の業績・財務・ビジネスモデルを分析して本来の価値を判断する手法
+→ PER・PBR・配当利回りなどがここに含まれる
+""")
+
+    with st.container(border=True):
+        st.markdown("**【投資スタイルの違い】**")
+        st.markdown("""
+**■ 長期積立投資**
+毎月一定額を積み立てて長期で運用する。リスクが分散され、初心者に最もおすすめ。
+
+**■ バリュー投資**
+割安（PBR1倍未満など）な銘柄を探して買い、本来の価値に戻るのを待つ手法。
+
+**■ 成長株投資**
+高い成長が期待できる企業に早期から投資する手法。リターンは大きいがリスクも高い。
+
+**■ 短期売買（スイングトレード等）**
+数日〜数週間単位で売買する手法。テクニカル分析を重視する。
+""")
+
+
+def _render_step6_integrated_chart(series: TimeSeries | None) -> None:
+    """Step6 Part2: 4段統合チャート（ローソク足+MA / 出来高 / RSI / MACD）を表示する。"""
+    if series is None or not series.data:
+        st.info("チャートデータを取得できませんでした。")
+        return
+
+    dates = [p.date for p in series.data]
+    opens = [p.open for p in series.data]
+    highs = [p.high for p in series.data]
+    lows = [p.low for p in series.data]
+    closes = [p.close for p in series.data]
+    volumes = [p.volume for p in series.data]
+
+    s = pd.Series(closes)
+    ma5 = s.rolling(window=5).mean().tolist()
+    ma25 = s.rolling(window=25).mean().tolist()
+    rsi = calc_rsi(closes)
+    macd_line, signal_line, histogram = calc_macd(closes)
+
+    hist_colors = [
+        "#aaaaaa" if (isinstance(v, float) and math.isnan(v)) else ("#4c72b0" if v >= 0 else "#c44e52")
+        for v in histogram
+    ]
+
+    fig = psp.make_subplots(
+        rows=4, cols=1,
+        shared_xaxes=True,
+        row_heights=[0.45, 0.20, 0.20, 0.15],
+        vertical_spacing=0.04,
+        subplot_titles=("ローソク足 + 移動平均", "出来高", "RSI", "MACD"),
+    )
+
+    fig.add_trace(go.Candlestick(
+        x=dates, open=opens, high=highs, low=lows, close=closes,
+        increasing_line_color="#26a69a", increasing_fillcolor="#26a69a",
+        decreasing_line_color="#ef5350", decreasing_fillcolor="#ef5350",
+        name="ローソク足", showlegend=False,
+    ), row=1, col=1)
+    fig.add_trace(go.Scatter(
+        x=dates, y=ma5, mode="lines", name="MA5",
+        line=dict(color="#ff7f0e", width=1.5, dash="dot"),
+        hovertemplate="%{x}<br>MA5 ¥%{y:,.0f}<extra></extra>",
+    ), row=1, col=1)
+    fig.add_trace(go.Scatter(
+        x=dates, y=ma25, mode="lines", name="MA25",
+        line=dict(color="#2ca02c", width=1.5),
+        hovertemplate="%{x}<br>MA25 ¥%{y:,.0f}<extra></extra>",
+    ), row=1, col=1)
+
+    fig.add_trace(go.Bar(
+        x=dates, y=volumes, name="出来高",
+        marker_color="#90caf9", showlegend=False,
+        hovertemplate="%{x}<br>出来高 %{y:,}<extra></extra>",
+    ), row=2, col=1)
+
+    fig.add_trace(go.Scatter(
+        x=dates, y=rsi, mode="lines", name="RSI(14)",
+        line=dict(color="#9467bd", width=2),
+        hovertemplate="%{x}<br>RSI %{y:.1f}<extra></extra>",
+    ), row=3, col=1)
+    fig.add_hline(y=70, line_dash="dash", line_color="red", line_width=1, row=3, col=1)
+    fig.add_hline(y=30, line_dash="dash", line_color="green", line_width=1, row=3, col=1)
+
+    fig.add_trace(go.Scatter(
+        x=dates, y=macd_line, mode="lines", name="MACD",
+        line=dict(color="orange", width=2),
+        hovertemplate="%{x}<br>MACD %{y:.2f}<extra></extra>",
+    ), row=4, col=1)
+    fig.add_trace(go.Scatter(
+        x=dates, y=signal_line, mode="lines", name="シグナル",
+        line=dict(color="red", width=1.5, dash="dash"),
+        hovertemplate="%{x}<br>Signal %{y:.2f}<extra></extra>",
+    ), row=4, col=1)
+    fig.add_trace(go.Bar(
+        x=dates, y=histogram, name="ヒストグラム",
+        marker_color=hist_colors, showlegend=False,
+        hovertemplate="%{x}<br>Hist %{y:.2f}<extra></extra>",
+    ), row=4, col=1)
+    fig.add_hline(y=0, line_dash="dot", line_color="gray", line_width=1, row=4, col=1)
+
+    fig.update_xaxes(rangeslider_visible=False)
+    fig.update_yaxes(title_text="株価（円）", row=1, col=1)
+    fig.update_yaxes(title_text="出来高", row=2, col=1)
+    fig.update_yaxes(title_text="RSI", range=[0, 100], row=3, col=1)
+    fig.update_yaxes(title_text="MACD", row=4, col=1)
+    fig.update_layout(
+        height=700,
+        margin=dict(l=0, r=0, t=30, b=0),
+        legend=dict(orientation="h", yanchor="bottom", y=1.01, xanchor="right", x=1),
+        showlegend=True,
+    )
+    st.plotly_chart(fig, use_container_width=True)
+
+
+def _compute_step6_snapshot(series: TimeSeries | None) -> dict | None:
+    """Step6 指標サマリー辞書を計算して返す。データ不足時は None。"""
+    if series is None or not series.data or len(series.data) < 5:
+        return None
+
+    closes = [p.close for p in series.data]
+    opens = [p.open for p in series.data]
+    volumes = [p.volume for p in series.data]
+
+    # ローソク足: 直近5日の陽線数
+    bullish_count = sum(1 for c, o in zip(closes[-5:], opens[-5:]) if c >= o)
+    trend = "上昇傾向" if bullish_count >= 3 else "下落傾向"
+    candlestick_text = f"5日中{bullish_count}日が陽線（{trend}）"
+
+    # MA25乖離率
+    s = pd.Series(closes)
+    ma25_val = s.rolling(window=25).mean().iloc[-1] if len(closes) >= 25 else None
+    if ma25_val is not None and not math.isnan(ma25_val):
+        dev = (closes[-1] - ma25_val) / ma25_val * 100
+        direction = "上回っている" if dev >= 0 else "下回っている"
+        ma_text = f"MA25を{abs(dev):.1f}%{direction}"
+    else:
+        ma_text = "データ不足（計算には25日分必要）"
+
+    # 出来高: 5日平均 vs 20日平均
+    if len(volumes) >= 20:
+        avg5 = sum(volumes[-5:]) / 5
+        avg20 = sum(volumes[-20:]) / 20
+        ratio = avg5 / avg20 * 100 if avg20 > 0 else 100
+        vol_trend = "増加傾向" if ratio >= 105 else ("減少傾向" if ratio <= 95 else "横ばい")
+        volume_text = f"20日平均比{ratio:.0f}%（{vol_trend}）"
+    else:
+        volume_text = "データ不足（計算には20日分必要）"
+
+    # RSI
+    rsi_values = calc_rsi(closes)
+    latest_rsi = next((v for v in reversed(rsi_values) if not math.isnan(v)), None)
+    if latest_rsi is not None:
+        status = "買われすぎ" if latest_rsi >= 70 else ("売られすぎ" if latest_rsi <= 30 else "中立")
+        rsi_text = f"{latest_rsi:.0f}（{status}）"
+    else:
+        rsi_text = "データ不足"
+
+    # MACD: 方向 + クロス検出（直近3日の符号変化）
+    _, _, hist_vals = calc_macd(closes)
+    valid_hist = [v for v in hist_vals if not math.isnan(v)]
+    if valid_hist:
+        recent3 = valid_hist[-3:]
+        has_cross = len(set(v >= 0 for v in recent3)) > 1 if len(recent3) >= 2 else False
+        if has_cross:
+            macd_text = "クロス付近（直近3日以内に符号変化）"
+        elif valid_hist[-1] >= 0:
+            macd_text = "上向き"
+        else:
+            macd_text = "下向き"
+    else:
+        macd_text = "データ不足"
+
+    return {
+        "candlestick": candlestick_text,
+        "ma": ma_text,
+        "volume": volume_text,
+        "rsi": rsi_text,
+        "macd": macd_text,
+    }
+
+
+def _render_step6_snapshot(snapshot: dict | None) -> None:
+    """Step6 指標サマリーを表示する。"""
+    if snapshot is None:
+        st.info("指標サマリーを生成するにはデータが不足しています。")
+        return
+    with st.container(border=True):
+        st.markdown("**📋 指標サマリー（直近データ）**")
+        st.write(f"🕯️ **ローソク足**: {snapshot['candlestick']}")
+        st.write(f"📈 **移動平均線**: {snapshot['ma']}")
+        st.write(f"📊 **出来高**: {snapshot['volume']}")
+        st.write(f"🔵 **RSI**: {snapshot['rsi']}")
+        st.write(f"📉 **MACD**: {snapshot['macd']}")
+
+
+def _render_step6_case_study(
+    snapshot: dict | None,
+    symbol: str,
+    company_name: str,
+    explanation_service,
+) -> None:
+    """Step6 Part3: AIケーススタディ（入力欄 + フィードバック + Step7誘導）。"""
+    st.markdown("### Part 3: あなたの判断を入力する（AIケーススタディ）")
+
+    # 銘柄切替時にリセット（cs_guide_shown はセッション内維持のためリセットしない）
+    if st.session_state.get("_cs_symbol") != symbol:
+        st.session_state["_cs_symbol"] = symbol
+        for k in ("cs_user_input", "cs_ai_feedback", "cs_feedback_done"):
+            st.session_state.pop(k, None)
+
+    st.write("上のチャートと指標サマリーを見て、あなたの考えを自由に入力してください。")
+    st.caption("例：「上昇傾向なので少し様子を見てから買いたい」「RSIが高いので今は見送りたい」")
+
+    # key を銘柄固有にすることで銘柄切替時に自動的に空のテキストエリアを表示する
+    user_input = st.text_area(
+        "あなたの考え",
+        key=f"cs_input_{symbol}",
+        height=100,
+        label_visibility="collapsed",
+        max_chars=500,
+    )
+
+    if st.button("AIにフィードバックをもらう", key="cs_btn_feedback", type="primary"):
+        if not user_input or not user_input.strip():
+            st.warning("考えを入力してからボタンを押してください。")
+        elif snapshot is None:
+            st.warning("指標データが取得できていないため、フィードバックを生成できません。")
+        elif explanation_service is None:
+            st.error("AIサービスが初期化されていません。")
+        else:
+            st.session_state["cs_user_input"] = user_input
+            with st.spinner("AIがフィードバックを生成中..."):
+                try:
+                    feedback = explanation_service.get_case_study_feedback(
+                        symbol=symbol,
+                        company_name=company_name,
+                        snapshot=snapshot,
+                        user_input=user_input,
+                    )
+                    st.session_state["cs_ai_feedback"] = feedback
+                    st.session_state["cs_feedback_done"] = True
+                    st.rerun()
+                except Exception:
+                    st.error("フィードバックの生成に失敗しました。しばらく待ってから再試行してください。")
+
+    feedback = st.session_state.get("cs_ai_feedback")
+    if feedback:
+        with st.container(border=True):
+            st.markdown("#### 🤖 AIからのフィードバック")
+            st.write(feedback)
+            st.caption("※ このフィードバックは学習目的のものです。投資の推奨・売買の助言ではありません。")
+        st.session_state["cs_guide_shown"] = True
+
+    if st.session_state.get("cs_guide_shown"):
+        st.info(
+            "複数指標を使った分析ができました。次のステップへ\n\n"
+            "実際に1株購入する準備はできていますか？"
+            "ページ下部の「投資スタートガイド」で口座開設から最初の1株を買うまでの手順を確認できます。"
+        )
+
+
 def _render_guidance_card(tab_name: str, prerequisites: list[str]) -> None:
     """推奨案内カードを表示する。"""
     with st.container(border=True):
@@ -759,6 +1271,9 @@ def render_news_area(symbol: str, profile, news_service) -> None:
 
         if "news_error" in st.session_state:
             st.warning("ニュースを取得できませんでした。しばらく待ってから再試行してください。")
+            if st.button("再試行", key="news_retry_btn"):
+                st.session_state.pop("news_error", None)
+                st.rerun()
         else:
             items = st.session_state.get("news_items", [])
             if not items:
@@ -767,7 +1282,7 @@ def render_news_area(symbol: str, profile, news_service) -> None:
                 for item in items:
                     st.markdown("---")
                     if item.link:
-                        st.markdown(f"▼ [{item.title}]({item.link})")
+                        st.markdown(f"▼ [{item.title}]({_safe_url(item.link)})")
                     else:
                         st.markdown(f"▼ {item.title}")
                     if item.pub_date:
@@ -782,6 +1297,56 @@ def render_news_area(symbol: str, profile, news_service) -> None:
 def render_error(message: str) -> None:
     """エラーメッセージを表示する。"""
     st.error(message)
+
+
+def render_investment_guide() -> None:
+    """Step7: 投資スタートガイドを表示する（静的コンテンツ）。"""
+    with st.container(border=True):
+        st.markdown("### 🎯 Step7: 最初の1株を買ってみよう")
+        st.write("ここまでで複数の指標を学びました。実際に1株買うまでの手順を説明します。")
+        st.divider()
+
+        st.markdown("#### 📋 STEP 1: 証券口座を開設する")
+        with st.container(border=True):
+            st.markdown("""
+**口座開設先の例**: SBI証券・楽天証券・松井証券など主要証券会社のウェブサイトから申し込めます。
+各社の手数料・サービス内容は各社公式サイトでご確認ください。
+
+> ⚠️ 本ツールは特定の証券会社を推奨しません。複数社を比較して選んでください。
+
+**口座開設の一般的な流れ**:
+1. 証券会社のウェブサイトから「口座開設」を申し込む
+2. 本人確認書類（マイナンバーカードまたは運転免許証）を提出する
+3. 審査・登録完了（最短翌営業日〜数日）
+4. 銀行から入金する
+""")
+
+        st.divider()
+
+        st.markdown("#### 📋 STEP 2: 最初の銘柄を選ぶ")
+        with st.container(border=True):
+            st.markdown("""
+- 自分がよく知っている企業から選ぶ（使ったことがある商品・サービスの会社）
+- 1株の価格が手頃な銘柄から始める（最初は1〜3万円程度から）
+- このツールで学んだ指標（ローソク足・MA・出来高・RSI・MACD）で確認してみる
+""")
+
+        st.divider()
+
+        st.markdown("#### 📋 STEP 3: 注文を出す")
+        with st.container(border=True):
+            st.markdown("""
+**■ 成行注文（なりゆき）**
+「今すぐ買いたい」→ 今の市場価格で即時約定。価格は指定できないが確実に約定する。
+
+**■ 指値注文（さしね）**
+「◯円以下なら買いたい」→ 希望価格を指定。設定価格に達しないと約定しないことがある。
+
+初めての場合は「成行注文で1株」が最もシンプルです。
+""")
+
+        st.warning("⚠️ 株式は元本保証ではありません。余裕資金で投資してください。投資判断はご自身の責任で行ってください。")
+        st.caption("中長期の現物取引に慣れてきたら「デイトレード」という手法もありますが、リスクが高く高度な技術が必要なため、まずは中長期投資で経験を積むことをおすすめします。")
 
 
 def render_footer(fetched_at: datetime | None = None) -> None:

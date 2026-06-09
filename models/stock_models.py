@@ -37,6 +37,9 @@ class TimeSeriesPoint:
     """時系列データの1点"""
     date: date
     close: float
+    open: float = 0.0
+    high: float = 0.0
+    low: float = 0.0
     volume: int = 0
 
 

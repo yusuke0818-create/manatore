@@ -26,3 +26,12 @@ CHART_DEFAULT_PERIOD: str = "3ヶ月"
 
 # APIキャッシュTTL（秒）
 CACHE_TTL: int = 300
+
+GRADUATION_STOCKS: list[dict] = [
+    {"code": "7203", "name": "トヨタ自動車"},
+    {"code": "8306", "name": "三菱UFJフィナンシャル・グループ"},
+    {"code": "9432", "name": "日本電信電話（NTT）"},
+    {"code": "7974", "name": "任天堂"},
+    {"code": "6758", "name": "ソニーグループ"},
+    {"code": "9434", "name": "ソフトバンク"},
+]

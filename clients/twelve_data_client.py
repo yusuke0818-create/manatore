@@ -90,6 +90,9 @@ class TwelveDataClient:
                 {
                     "datetime": dt.strftime("%Y-%m-%d"),
                     "close": str(row["Close"]),
+                    "open": str(row["Open"]),
+                    "high": str(row["High"]),
+                    "low": str(row["Low"]),
                     "volume": int(row.get("Volume", 0)),
                 }
                 for dt, row in hist.iterrows()
