@@ -40,6 +40,18 @@ from ui import components, glossary, graduation_exam, lesson_beginner, lesson_st
 
 def main() -> None:
     st.set_page_config(page_title="マナトレ — 投資学習ツール", page_icon="📈", layout="wide")
+    st.markdown(
+        """
+        <style>
+        #MainMenu {visibility: hidden;}
+        footer {visibility: hidden;}
+        header {visibility: hidden;}
+        [data-testid="stToolbar"] {display: none;}
+        [data-testid="manage-app-button"] {display: none;}
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
     st.title("📈 マナトレ — 投資学習ツール")
 
     glossary.load()
