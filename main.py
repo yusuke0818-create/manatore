@@ -47,6 +47,7 @@ def main() -> None:
         [data-testid="stHeader"] {display: none !important;}
         [data-testid="stToolbar"] {display: none !important;}
         [data-testid="stMainMenu"] {display: none !important;}
+        [data-testid="stHeaderActionElements"] {display: none !important;}
         footer {display: none !important;}
         </style>
         """
