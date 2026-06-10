@@ -10,7 +10,6 @@ from dotenv import load_dotenv
 load_dotenv()
 
 import streamlit as st
-import streamlit.components.v1 as st_components
 
 # Streamlit Cloud: st.secrets → os.environ に転送（os.environ.get()で読む既存コードと互換）
 # ⚠️ フラット形式のみ対応。[section]形式のネストセクションはスキップされる。
@@ -41,42 +40,16 @@ from ui import components, glossary, graduation_exam, lesson_beginner, lesson_st
 
 def main() -> None:
     st.set_page_config(page_title="マナトレ — 投資学習ツール", page_icon="📈", layout="wide")
-    # Streamlit 1.35+ は st.markdown() の <style> タグを除去するため JavaScript で直接 DOM 操作する
-    st_components.html(
+    # st.html() は Streamlit 1.31+ で利用可能。st.markdown() と異なり <style> タグを除去しない
+    st.html(
         """
-        <script>
-        (function () {
-            function hide() {
-                // アプリ iframe 内のヘッダー・ツールバー・メニューを非表示
-                try {
-                    var d = window.parent.document;
-                    ['[data-testid="stHeader"]',
-                     '[data-testid="stToolbar"]',
-                     '[data-testid="stMainMenu"]'
-                    ].forEach(function(sel) {
-                        var el = d.querySelector(sel);
-                        if (el) el.style.setProperty('display', 'none', 'important');
-                    });
-                } catch(e) {}
-                // 外側 Streamlit Cloud ラッパー（Manage app / バッジ等）を非表示
-                try {
-                    var od = window.parent.parent.document;
-                    ['._viewerBadge_nim44_23',
-                     '._profileContainer_gzau3_53'
-                    ].forEach(function(sel) {
-                        var el = od.querySelector(sel);
-                        if (el) el.style.setProperty('display', 'none', 'important');
-                    });
-                } catch(e) {}
-            }
-            hide();
-            setTimeout(hide, 300);
-            setTimeout(hide, 1000);
-        })();
-        </script>
-        """,
-        height=0,
-        scrolling=False,
+        <style>
+        [data-testid="stHeader"] {display: none !important;}
+        [data-testid="stToolbar"] {display: none !important;}
+        [data-testid="stMainMenu"] {display: none !important;}
+        footer {display: none !important;}
+        </style>
+        """
     )
     st.title("📈 マナトレ — 投資学習ツール")
 
